@@ -91,33 +91,33 @@ def irr_repr(order, alpha, beta, gamma, dtype=None):
     return torch.tensor(wigner_D_matrix(order, np.array(alpha), np.array(beta), np.array(gamma)), dtype=torch.get_default_dtype() if dtype is None else dtype)
 
 
-# def spherical_harmonics(order, alpha, beta, dtype=None):
-#     """
-#     spherical harmonics
-#     - compatible with irr_repr and compose
-#     """
-#     # from from_lielearn_SO3.spherical_harmonics import sh
-#     from lie_learn.representations.SO3.spherical_harmonics import sh  # real valued by default
-#
-#     ###################################################################################################################
-#     # ON ANGLE CONVENTION
-#     #
-#     # sh has following convention for angles:
-#     # :param theta: the colatitude / polar angle, ranging from 0(North Pole, (X, Y, Z) = (0, 0, 1)) to pi(South Pole, (X, Y, Z) = (0, 0, -1)).
-#     # :param phi: the longitude / azimuthal angle, ranging from 0 to 2 pi.
-#     #
-#     # this function therefore (probably) has the following convention for alpha and beta:
-#     # beta = pi - theta; ranging from 0(South Pole, (X, Y, Z) = (0, 0, -1)) to pi(North Pole, (X, Y, Z) = (0, 0, 1)).
-#     # alpha = phi
-#     #
-#     ###################################################################################################################
-#
-#     Y = torch.tensor([sh(order, m, theta=math.pi - beta, phi=alpha) for m in range(-order, order + 1)], dtype=torch.get_default_dtype() if dtype is None else dtype)
-#     # if order == 1:
-#     #     # change of basis to have vector_field[x, y, z] = [vx, vy, vz]
-#     #     A = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]])
-#     #     return A @ Y
-#     return Y
+def spherical_harmonics(order, alpha, beta, dtype=None):
+    """
+    spherical harmonics
+    - compatible with irr_repr and compose
+    """
+    # from from_lielearn_SO3.spherical_harmonics import sh
+    from lie_learn.representations.SO3.spherical_harmonics import sh  # real valued by default
+
+    ###################################################################################################################
+    # ON ANGLE CONVENTION
+    #
+    # sh has following convention for angles:
+    # :param theta: the colatitude / polar angle, ranging from 0(North Pole, (X, Y, Z) = (0, 0, 1)) to pi(South Pole, (X, Y, Z) = (0, 0, -1)).
+    # :param phi: the longitude / azimuthal angle, ranging from 0 to 2 pi.
+    #
+    # this function therefore (probably) has the following convention for alpha and beta:
+    # beta = pi - theta; ranging from 0(South Pole, (X, Y, Z) = (0, 0, -1)) to pi(North Pole, (X, Y, Z) = (0, 0, 1)).
+    # alpha = phi
+    #
+    ###################################################################################################################
+
+    Y = torch.tensor([sh(order, m, theta=math.pi - beta, phi=alpha) for m in range(-order, order + 1)], dtype=torch.get_default_dtype() if dtype is None else dtype)
+    # if order == 1:
+    #     # change of basis to have vector_field[x, y, z] = [vx, vy, vz]
+    #     A = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]])
+    #     return A @ Y
+    return Y
 
 
 def compose(a1, b1, c1, a2, b2, c2):
@@ -257,15 +257,16 @@ def _test_change_basis_wigner_to_rot():
             [1, 0, 0]
         ], dtype=torch.float64)
 
-        a, b, c = torch.rand(3)
+        # a, b, c = torch.rand(3)
+        a, b, c = np.random.random_sample(3)
 
         r1 = A.t() @ torch.tensor(wigner_D_matrix(1, a, b, c), dtype=torch.float64) @ A
+
         r2 = rot(a, b, c)
 
         d = (r1 - r2).abs().max()
         print(d.item())
         assert d < 1e-10
-
 
 if __name__ == "__main__":
     from functools import partial
