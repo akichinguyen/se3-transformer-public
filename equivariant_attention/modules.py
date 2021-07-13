@@ -382,7 +382,7 @@ class G1x1SE3_q(nn.Module):
             if int(k) in tr_keys:
                 for dv_in in self.fv_in.degrees:
                     for dv_out in self.fv_out.degrees:
-                        output[f'{k}{dv_in}{dv_out}'] = torch.matmul(self.transform[f'({k},{dv_in},{dv_out})'], v)
+                        output[f'{k},{dv_in},{dv_out}'] = torch.matmul(self.transform[f'({k},{dv_in},{dv_out})'], v)
 
         return output
 
@@ -773,7 +773,7 @@ class GConvSE3Partial_value(nn.Module):
                     src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
                 edge = edges.data[f'({d_in},{d_out})']
                 tmp = torch.matmul(edge, src)
-                msg[f'out{d_in}{d_out}'] = tmp.view(tmp.shape[0], -1, 2*d_out+1)
+                msg[f'out{d_in},{d_out}'] = tmp.view(tmp.shape[0], -1, 2*d_out+1)
 
             return msg
         return fnc
@@ -810,7 +810,7 @@ class GConvSE3Partial_value(nn.Module):
             for d in self.f_out.degrees:
                 G.apply_edges(self.udf_u_mul_e(d))
 
-            return {f'{d_in}{d_out}': G.edata[f'out{d_in}{d_out}'] for d_in in self.f_in.degrees for d_out in self.f_out.degrees}
+            return {f'{d_in},{d_out}': G.edata[f'out{d_in},{d_out}'] for d_in in self.f_in.degrees for d_out in self.f_out.degrees}
 
 ##########################################
 ##########################################
@@ -892,7 +892,7 @@ class GConvSE3Partial_key(nn.Module):
                 msg = msg + torch.matmul(edge, src) #sum over all d_in => prob need to keep this separate, not sum up
             msg = msg.view(msg.shape[0], -1, 2*d_out+1)
 
-            return {f'out{d_out}{dv_in}{dv_out}': msg.view(msg.shape[0], -1, 2*d_out+1)}
+            return {f'out{d_out},{dv_in},{dv_out}': msg.view(msg.shape[0], -1, 2*d_out+1)}
         return fnc
 
     @profile
@@ -931,7 +931,7 @@ class GConvSE3Partial_key(nn.Module):
                     for d in self.f_out.degrees:
                         G.apply_edges(self.udf_u_mul_e(d, dv_i, dv_o))
 
-            return {f'{d}{dv_i}{dv_o}': G.edata[f'out{d}{dv_i}{dv_o}'] for d in self.f_out.degrees for dv_i in self.fv_in.degrees for dv_o in self.fv_out.degrees}
+            return {f'{d},{dv_i},{dv_o}': G.edata[f'out{d},{dv_i},{dv_o}'] for d in self.f_out.degrees for dv_i in self.fv_in.degrees for dv_o in self.fv_out.degrees}
 
 ##########################################
 
@@ -1019,9 +1019,9 @@ class GMABSE3(nn.Module):
             return output
 
 ##########################################
-def fiber2head_qkv(F, h, structure, v_in, v_out, squeeze=False):
+def fiber2head_qkv(F, h, structure, vin, vout, squeeze=False):
     if squeeze:
-        fibers = [F[f'{i}{vin}{vout}'].view(*F[f'{i}{vin}{vout}'].shape[:-2], h, -1) for i in structure.degrees for vin in v_in.degrees for vout in v_out.degrees]
+        fibers = [F[f'{i},{vin},{vout}'].view(*F[f'{i},{vin},{vout}'].shape[:-2], h, -1) for i in structure.degrees]
         fibers = torch.cat(fibers, -1)
     else:
         fibers = [F[f'{i}'].view(*F[f'{i}'].shape[:-2], h, -1, 1) for i in structure.degrees]
@@ -1065,8 +1065,8 @@ class GMABSE3_qkv(nn.Module):
             # Neighbor -> center messages
             msg = 0
             for dv_in in self.fv_in.degrees:
-                attn = edges.data[f'a{dv_in}{d_out}']
-                value = edges.data[f'v{dv_in}{d_out}']
+                attn = edges.data[f'a{dv_in},{d_out}']
+                value = edges.data[f'v{dv_in},{d_out}']
 
             # Apply attention weights
                 msg += attn.unsqueeze(-1).unsqueeze(-1) * value
@@ -1092,26 +1092,26 @@ class GMABSE3_qkv(nn.Module):
             ## We use the stacked tensor representation for attention
             for mv_in, dv_in in self.fv_in.structure:
                 for mv_out, dv_out in self.f_value.structure:
-                    G.edata[f'v{dv_in}{dv_out}'] = v[f'{dv_in}{dv_out}'].view(-1, self.n_heads, mv_out // self.n_heads,
+                    G.edata[f'v{dv_in},{dv_out}'] = v[f'{dv_in},{dv_out}'].view(-1, self.n_heads, mv_out // self.n_heads,
                                                   2 * dv_out + 1)
-                    G.edata[f'k{dv_in}{dv_out}'] = fiber2head_qkv(k, self.n_heads, self.f_key, self.fv_in, self.f_value,
+                    G.edata[f'k{dv_in},{dv_out}'] = fiber2head_qkv(k, self.n_heads, self.f_key, dv_in, dv_out,
                                       squeeze=True)
-                    G.ndata[f'q{dv_in}{dv_out}'] = fiber2head_qkv(q, self.n_heads, self.f_key, self.fv_in, self.f_value, squeeze=True)  # [nodes, heads, channels](?)
+                    G.ndata[f'q{dv_in},{dv_out}'] = fiber2head_qkv(q, self.n_heads, self.f_key, dv_in, dv_out, squeeze=True)  # [nodes, heads, channels](?)
 
             # Compute attention weights
             ## Inner product between (key) neighborhood and (query) center
 
-                    G.apply_edges(fn.e_dot_v(f'k{dv_in}{dv_out}', f'q{dv_in}{dv_out}', f'e{dv_in}{dv_out}'))
+                    G.apply_edges(fn.e_dot_v(f'k{dv_in},{dv_out}', f'q{dv_in},{dv_out}', f'e{dv_in},{dv_out}'))
 
             ## Apply softmax
-                    e = G.edata.pop(f'e{dv_in}{dv_out}')
+                    e = G.edata.pop(f'e{dv_in},{dv_out}')
                     if self.new_dgl:
                         # in dgl 5.3, e has an extra dimension compared to dgl 4.3
                         # the following, we get rid of this be reshaping
-                        n_edges = G.edata[f'k{dv_in}{dv_out}'].shape[0]
+                        n_edges = G.edata[f'k{dv_in},{dv_out}'].shape[0]
                         e = e.view([n_edges, self.n_heads])
                     e = e / np.sqrt(self.f_key.n_features)
-                    G.edata[f'a{dv_in}{dv_out}'] = edge_softmax(G, e)
+                    G.edata[f'a{dv_in},{dv_out}'] = edge_softmax(G, e)
 
             # Perform attention-weighted message-passing
             for d in self.f_value.degrees:
