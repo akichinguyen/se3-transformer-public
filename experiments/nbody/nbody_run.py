@@ -1,10 +1,10 @@
-from utils.utils_profiling import *  # load before other local modules
+#from utils.utils_profiling import *  # load before other local modules
 
 import argparse
 import os
 import sys
 import warnings
-
+sys.path.insert(0, '/Users/thunguyen/PycharmProjects/original_se3/se3-transformer-public')
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 import dgl
