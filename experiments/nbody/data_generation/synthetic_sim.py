@@ -101,6 +101,7 @@ class SpringSim(object):
         clamp_next = np.zeros([n,])
         v_norm = np.sqrt((vel_next ** 2).sum(axis=0)).reshape(1, -1)
         vel_next = vel_next * self.vel_norm / v_norm
+        print(vel_next)
         loc[0, :, :], vel[0, :, :], clamp[0, :] = self._clamp(loc_next, vel_next)
 
         # disables division by zero warning, since I fix it with fill_diagonal
