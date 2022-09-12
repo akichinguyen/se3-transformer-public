@@ -62,11 +62,12 @@ class DipoleSim(object):
         return loc, vel, clamp
 
 
-    def simulation(self, T=10000, sample_freq=10, charge_prob=[1. / 2, 0, 1. / 2]):
+    def simulation(self, T=10, sample_freq=2, charge_prob=[1. / 2, 0, 1. / 2]):
         T_save = int(T / sample_freq - 1)
         counter = 0
         charges = np.random.choice(self._charge_types, size=(self.n_particle, 1),
-                                   p=charge_prob)
+                                   p=charge_prob)/2.0
+
         edges = charges.dot(charges.transpose())
         loc = np.zeros((T_save, self.dim, self.n_particle))
         vel = np.zeros((T_save, self.dim, self.n_particle))
@@ -75,13 +76,14 @@ class DipoleSim(object):
         ang_vel_parallel = np.zeros((T_save, self.dim, self.n_particle))
         ang_vel_perpen = np.zeros((T_save, self.dim, self.n_particle))
         clamp = np.zeros((T_save, self.n_particle))
-        loc_next = np.random.uniform(-1., 1., (self.dim, self.n_particle)) * self.loc_std
+
+        loc_next = np.random.randn(self.dim, self.n_particle) * self.loc_std
         vel_next = np.random.randn(self.dim, self.n_particle)
         v_norm = np.sqrt((vel_next ** 2).sum(axis=0)).reshape(1, -1)
         vel_next = vel_next * self.vel_norm / v_norm
-        di_moment[0] = np.random.uniform(0.41, 0.58, (self.dim, self.n_particle))
+        di_moment[0] = np.random.uniform(0.41, 0.58, (self.dim, self.n_particle))/2.0
+        print(di_moment)
         ang_vel[0] = np.random.randn(self.dim, self.n_particle)
-        print(loc_next)
         loc[0, :, :], vel[0, :, :], clamp[0, :] = self._clamp(loc_next, vel_next)
         loc_next = loc[0]
         vel_next = vel[0]
@@ -154,8 +156,9 @@ class DipoleSim(object):
 
 
 if __name__ == '__main__':
+
     sim = DipoleSim()
-    loc, vel = sim.simulation(T=5000, sample_freq=100)
+    loc, vel = sim.simulation(T=1000, sample_freq=500)
     plt.figure()
     axes = plt.gca(projection='3d')
     axes.set_xlim([-1., 1.])

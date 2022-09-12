@@ -383,8 +383,6 @@ if __name__ == '__main__':
 
     t = time.time()
     loc, vel, edges, clamp = sim.sample_trajectory(T=5000, sample_freq=100)
-
-    print(edges)
     print("Simulation time: {}".format(time.time() - t))
     vel_norm = np.sqrt((vel ** 2).sum(axis=1))
     plt.figure()
