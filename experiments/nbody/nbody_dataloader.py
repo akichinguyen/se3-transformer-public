@@ -29,6 +29,8 @@ class RIDataset(torch.utils.data.Dataset):
         # Dependent on simulation type set filenames.
         if 'charged' in FLAGS.ri_data_type:
             _data_type = 'charged'
+        elif 'dipole' in FLAGS.ri_data_type:
+            _data_type = 'dipole'
         else:
             assert 'springs' in FLAGS.ri_data_type
             _data_type = 'springs'
