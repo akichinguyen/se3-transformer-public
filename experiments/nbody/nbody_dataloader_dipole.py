@@ -46,6 +46,9 @@ class RIDataset(torch.utils.data.Dataset):
 
         data["points"] = np.swapaxes(data["points"], 2, 3)[:, FLAGS.ri_burn_in:]
         data["vel"] = np.swapaxes(data["vel"], 2, 3)[:, FLAGS.ri_burn_in:]
+        data["orientation"] = np.swapaxes(data["orientation"], 2, 3)[:, FLAGS.ri_burn_in:]
+        data["ang_vel"] = np.swapaxes(data["ang_vel"], 2, 3)[:, FLAGS.ri_burn_in:]
+
 
         if 'sample_freq' not in data.keys():
             data['sample_freq'] = 100
@@ -57,9 +60,6 @@ class RIDataset(torch.utils.data.Dataset):
         self.n_frames = data['points'].shape[1]
         self.n_points = data['points'].shape[2]
 
-        if split == 'train':
-            print(data["points"][0, 0, 0])
-            print(data["points"][-1, 30, 0])
 
     # number of instances in the dataset (always need that in a dataset object)
     def __len__(self):
@@ -98,6 +98,10 @@ class RIDataset(torch.utils.data.Dataset):
         x_T = torch.tensor(self.data['points'][idx, frame_T].astype(DTYPE)) - x_0
         v_0 = torch.tensor(self.data['vel'][idx, frame_0].astype(DTYPE))
         v_T = torch.tensor(self.data['vel'][idx, frame_T].astype(DTYPE)) - v_0
+        ornt_0 = torch.tensor(self.data['orientation'][idx, frame_0].astype(DTYPE))
+        ornt_T = torch.tensor(self.data['orientation'][idx, frame_T].astype(DTYPE)) - ornt_0
+        ang_v_0 = torch.tensor(self.data['ang_vel'][idx, frame_0].astype(DTYPE))
+        ang_v_T = torch.tensor(self.data['ang_vel'][idx, frame_T].astype(DTYPE)) - ang_v_0
         charges = torch.tensor(self.data["charges"][idx].astype(DTYPE))
 
         # Create graph (connections only, no bond or feature information yet)
@@ -106,12 +110,15 @@ class RIDataset(torch.utils.data.Dataset):
 
         ### add bond & feature information to graph
         G.ndata['x'] = torch.unsqueeze(x_0, dim=1)  # [N, 1, 3]
-        G.ndata['v'] = torch.unsqueeze(v_0, dim=1)  # [N, 1, 3]
+        # G.ndata['v'] = torch.unsqueeze(v_0, dim=1)  # [N, 1, 3]
+        # G.ndata['o'] = torch.unsqueeze(ornt_0, dim=1)  # [N, 1, 3]
+        # G.ndata['a'] = torch.unsqueeze(ang_v_0, dim=1)  # [N, 1, 3]
+        G.ndata['f'] = torch.cat((torch.unsqueeze(v_0, dim=1), torch.unsqueeze(ornt_0, dim=1), torch.unsqueeze(ang_v_0, dim=1)), 1)
         G.ndata['c'] = torch.unsqueeze(charges, dim=1)  # [N, 1, 1]
         G.edata['d'] = x_0[indices_dst] - x_0[indices_src]  # relative postions
         G.edata['w'] = charges[indices_dst] * charges[indices_src]
 
         r = torch.sqrt(torch.sum(G.edata['d'] ** 2, -1, keepdim=True))
 
-        return G, x_T, v_T
+        return G, x_T, v_T, ornt_T, ang_v_T
 
