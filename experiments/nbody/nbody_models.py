@@ -31,12 +31,11 @@ class SE3Transformer(nn.Module):
         self.si_m, self.si_e = si_m, si_e
         self.x_ij = x_ij
 
-        self.fibers = {'in': Fiber(dictionary={1: 1}),
+        self.fibers = {'in': Fiber(dictionary={0:1, 1: 3}),
                        'mid': Fiber(self.num_degrees, self.num_channels),
-                       'out': Fiber(dictionary={1: 2})}
+                       'out': Fiber(dictionary={1: 4})}
 
         self.Gblock = self._build_gcn(self.fibers)
-        print(self.Gblock)
 
     def _build_gcn(self, fibers):
         # Equivariant layers
@@ -55,7 +54,7 @@ class SE3Transformer(nn.Module):
     def forward(self, G):
         # Compute equivariant weight basis from relative positions
         basis, r = get_basis_and_r(G, self.num_degrees-1)
-        h_enc = {'1': G.ndata['v']}
+        h_enc = {'0': G.ndata['c'], '1': G.ndata['f']}
         for layer in self.Gblock:
             h_enc = layer(h_enc, G=G, r=r, basis=basis)
 
@@ -79,8 +78,6 @@ class TFN(nn.Module):
 
         blocks = self._build_gcn(self.fibers)
         self.Gblock, self.FCblock = blocks
-        print(self.Gblock)
-        print(self.FCblock)
         # purely for counting paramters in utils_logging.py
         self.enc, self.dec = self.Gblock, self.FCblock
 

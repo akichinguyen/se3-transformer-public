@@ -1,5 +1,6 @@
-from synthetic_sim import DipoleSim
+from synthetic_sim_dipole import DipoleSim
 import time
+import os
 import numpy as np
 import argparse
 import subprocess
@@ -24,37 +25,69 @@ parser.add_argument('--sample-freq', type=int, default=100,
                     help='How often to sample the trajectory.')
 parser.add_argument('--n-balls', type=int, default=5,
                     help='Number of balls in the simulation.')
-parser.add_argument('--seed', type=int, default=42,
+parser.add_argument('--seed', type=int, default=0,
                     help='Random seed.')
 parser.add_argument('--dim', type=int, default=3,
                     help='Spatial simulation dimension (2 or 3).')
+parser.add_argument('--mudip', type=float, default=0.707107,
+                    help='Dipole moment of particle.')
 parser.add_argument('--boxsize', type=float, default=5.0,
                     help='Size of a surrounding box. If 0, then no box.')
+parser.add_argument('--temp', type=float, default=0.1,
+                    help='Temperature set for system.')
 
 args = parser.parse_args()
 args_dict = vars(args)
 # git_commit = subprocess.check_output(["git", "describe", "--always"]).strip()
+
+seed = args.seed
+if not seed:
+   seed = int.from_bytes(os.urandom(20), byteorder="big") % 1000000000
+
+#print("seed = ", seed)
+np.random.seed(seed)
+
+print("=====================")
+print("simulation",args.simulation)
+print("name",args.name)
+print("num_train",args.num_train)
+print("num_test",args.num_test)
+print("length",args.length)
+print("length_test",args.length_test)
+print("sample_freq",args.sample_freq)
+print("n_balls",args.n_balls)
+print("seed",args.seed)
+print("dim",args.dim)
+print("mudip",args.mudip)
+print("boxsize",args.boxsize)
+print("temp",args.temp)
+print("---------------------")
 
 if args.simulation == 'dipole':
     sim = DipoleSim(noise_var=0.0,
                     n_particle=args.n_balls,
                     box_size=args.boxsize,
                     dim=args.dim,
-                    type='dipole')
+                    mudip = args.mudip,
+                    temp=args.temp,
+                    type='dipole',
+                    seed = seed)
     suffix = '_dipole_' + str(args.dim) + 'D_'
 elif args.simulation == 'charged':
     sim = DipoleSim(noise_var=0.0,
                               n_particle=args.n_balls,
                               box_size=args.boxsize,
                               dim=args.dim,
-                    type='charged')
+                              temp=args.temp,
+                              type='charged',
+                              seed = seed)
     suffix = '_charged_' + str(args.dim) + 'D_'
 else:
     raise ValueError('Simulation {} not implemented'.format(args.simulation))
 
 suffix += str(args.n_balls)
 suffix += '_' + str(args.name)
-np.random.seed(args.seed)
+
 
 print(suffix)
 
