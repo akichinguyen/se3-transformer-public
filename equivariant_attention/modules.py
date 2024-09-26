@@ -304,7 +304,7 @@ class PairwiseConv(nn.Module):
     @profile
     def forward(self, feat, basis):
         # Get radial weights
-        R = self.rp(feat)
+        R = self.rp(feat) #phi_lk #basis = w_lk_J
         kernel = torch.sum(R * basis[f'{self.degree_in},{self.degree_out}'], -1)
         return kernel.view(kernel.shape[0], self.d_out*self.nc_out, -1)
 
@@ -341,6 +341,52 @@ class G1x1SE3(nn.Module):
                 output[k] = torch.matmul(self.transform[str(k)], v)
         return output
 
+
+#####################################
+class G1x1SE3_q(nn.Module):
+    """Graph Linear SE(3)-equivariant layer, equivalent to a 1x1 convolution.
+
+    This is equivalent to a self-interaction layer in TensorField Networks.
+    """
+    def __init__(self, f_in, f_out, fv_in, fv_out, learnable=True):
+        """SE(3)-equivariant 1x1 convolution.
+
+        Args:
+            f_in: input Fiber() of feature multiplicities and types
+            f_out: output Fiber() of feature multiplicities and types
+        """
+        super().__init__()
+        self.f_in = f_in
+        self.f_out = f_out
+        self.fv_in = fv_in
+        self.fv_out = fv_out
+
+        # Linear mappings: 1 per output feature type
+        self.transform = nn.ParameterDict()
+        for m_out, d_out in self.f_out.structure:
+            for mv_in, dv_in in self.fv_in.structure:
+                for mv_out, dv_out in self.fv_out.structure:
+                    m_in = self.f_in.structure_dict[d_out]
+                    self.transform[f'({d_out},{dv_in},{dv_out})'] = nn.Parameter(torch.randn(m_out, m_in) / np.sqrt(m_in), requires_grad=learnable)
+
+    def __repr__(self):
+         return f"G1x1SE3(structure={self.f_out})"
+
+    def forward(self, features, **kwargs):
+        output = {}
+        tr_keys = []
+        for i in self.transform.keys():
+            tr_keys.append(int(eval(i)[0]))
+
+        for k, v in features.items():
+            if int(k) in tr_keys:
+                for dv_in in self.fv_in.degrees:
+                    for dv_out in self.fv_out.degrees:
+                        output[f'{k},{dv_in},{dv_out}'] = torch.matmul(self.transform[f'({k},{dv_in},{dv_out})'], v)
+
+        return output
+
+#######################################
 
 class GNormBias(nn.Module):
     """Norm-based SE(3)-equivariant nonlinearity with only learned biases."""
@@ -613,7 +659,7 @@ class GConvSE3Partial(nn.Module):
                 else:
                     src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
                 edge = edges.data[f'({d_in},{d_out})']
-                msg = msg + torch.matmul(edge, src)
+                msg = msg + torch.matmul(edge, src) #sum over all d_in => prob need to keep this separate, not sum up
             msg = msg.view(msg.shape[0], -1, 2*d_out+1)
 
             return {f'out{d_out}': msg.view(msg.shape[0], -1, 2*d_out+1)}
@@ -654,6 +700,241 @@ class GConvSE3Partial(nn.Module):
             return {f'{d}': G.edata[f'out{d}'] for d in self.f_out.degrees}
 
 
+##########################################
+class GConvSE3Partial_value(nn.Module):
+    """Graph SE(3)-equivariant node -> edge layer"""
+    def __init__(self, f_in, f_out, edge_dim: int=0, x_ij=None):
+        """SE(3)-equivariant partial convolution.
+
+        A partial convolution computes the inner product between a kernel and
+        each input channel, without summing over the result from each input
+        channel. This unfolded structure makes it amenable to be used for
+        computing the value-embeddings of the attention mechanism.
+
+        Args:
+            f_in: list of tuples [(multiplicities, type),...]
+            f_out: list of tuples [(multiplicities, type),...]
+        """
+        super().__init__()
+        self.f_out = f_out
+        self.edge_dim = edge_dim
+
+        # adding/concatinating relative position to feature vectors
+        # 'cat' concatenates relative position & existing feature vector
+        # 'add' adds it, but only if multiplicity > 1
+        assert x_ij in [None, 'cat', 'add']
+        self.x_ij = x_ij
+        if x_ij == 'cat':
+            self.f_in = Fiber.combine(f_in, Fiber(structure=[(1,1)]))
+        else:
+            self.f_in = f_in
+
+        # Node -> edge weights
+        self.kernel_unary = nn.ModuleDict()
+        for (mi, di) in self.f_in.structure:
+            for (mo, do) in self.f_out.structure:
+                self.kernel_unary[f'({di},{do})'] = PairwiseConv(di, mi, do, mo, edge_dim=edge_dim)
+
+    def __repr__(self):
+        return f'GConvSE3Partial(structure={self.f_out})'
+
+    def udf_u_mul_e(self, d_out):
+        """Compute the partial convolution for a single output feature type.
+
+        This function is set up as a User Defined Function in DGL.
+
+        Args:
+            d_out: output feature type
+        Returns:
+            node -> edge function handle
+        """
+        def fnc(edges):
+            # Neighbor -> center messages
+            msg = {}
+            for m_in, d_in in self.f_in.structure:
+                # if type 1 and flag set, add relative position as feature
+                if self.x_ij == 'cat' and d_in == 1:
+                    # relative positions
+                    rel = (edges.dst['x'] - edges.src['x']).view(-1, 3, 1)
+                    m_ori = m_in - 1
+                    if m_ori == 0:
+                        # no type 1 input feature, just use relative position
+                        src = rel
+                    else:
+                        # features of src node, shape [edges, m_in*(2l+1), 1]
+                        src = edges.src[f'{d_in}'].view(-1, m_ori*(2*d_in+1), 1)
+                        # add to feature vector
+                        src = torch.cat([src, rel], dim=1)
+                elif self.x_ij == 'add' and d_in == 1 and m_in > 1:
+                    src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
+                    rel = (edges.dst['x'] - edges.src['x']).view(-1, 3, 1)
+                    src[..., :3, :1] = src[..., :3, :1] + rel
+                else:
+                    src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
+                edge = edges.data[f'({d_in},{d_out})']
+                tmp = torch.matmul(edge, src)
+                msg[f'out{d_in},{d_out}'] = tmp.view(tmp.shape[0], -1, 2*d_out+1)
+
+            return msg
+        return fnc
+
+    @profile
+    def forward(self, h, G=None, r=None, basis=None, **kwargs):
+        """Forward pass of the linear layer
+
+        Args:
+            h: dict of node-features
+            G: minibatch of (homo)graphs
+            r: inter-atomic distances
+            basis: pre-computed Q * Y
+        Returns:
+            tensor with new features [B, n_points, n_features_out]
+        """
+        with G.local_scope():
+            # Add node features to local graph scope
+            for k, v in h.items():
+                G.ndata[k] = v
+
+            # Add edge features
+            if 'w' in G.edata.keys():
+                w = G.edata['w'] # shape: [#edges_in_batch, #bond_types]
+                feat = torch.cat([w, r], -1)
+            else:
+                feat = torch.cat([r, ], -1)
+            for (mi, di) in self.f_in.structure:
+                for (mo, do) in self.f_out.structure:
+                    etype = f'({di},{do})'
+                    G.edata[etype] = self.kernel_unary[etype](feat, basis)
+
+            # Perform message-passing for each output feature type
+            for d in self.f_out.degrees:
+                G.apply_edges(self.udf_u_mul_e(d))
+
+            return {f'{d_in},{d_out}': G.edata[f'out{d_in},{d_out}'] for d_in in self.f_in.degrees for d_out in self.f_out.degrees}
+
+##########################################
+##########################################
+class GConvSE3Partial_key(nn.Module):
+    """Graph SE(3)-equivariant node -> edge layer"""
+    def __init__(self, f_in, f_out, fv_in, fv_out, edge_dim: int=0, x_ij=None):
+        """SE(3)-equivariant partial convolution.
+
+        A partial convolution computes the inner product between a kernel and
+        each input channel, without summing over the result from each input
+        channel. This unfolded structure makes it amenable to be used for
+        computing the value-embeddings of the attention mechanism.
+
+        Args:
+            f_in: list of tuples [(multiplicities, type),...]
+            f_out: list of tuples [(multiplicities, type),...]
+        """
+        super().__init__()
+        self.f_out = f_out
+        self.edge_dim = edge_dim
+        self.fv_in = fv_in
+        self.fv_out = fv_out
+
+        # adding/concatinating relative position to feature vectors
+        # 'cat' concatenates relative position & existing feature vector
+        # 'add' adds it, but only if multiplicity > 1
+        assert x_ij in [None, 'cat', 'add']
+        self.x_ij = x_ij
+        if x_ij == 'cat':
+            self.f_in = Fiber.combine(f_in, Fiber(structure=[(1,1)]))
+        else:
+            self.f_in = f_in
+
+        # Node -> edge weights
+        self.kernel_unary = nn.ModuleDict()
+        for (mi, di) in self.f_in.structure:
+            for (mo, do) in self.f_out.structure:
+                for (mvi, dvi) in self.fv_in.structure:
+                    for(mvo, dvo) in self.fv_out.structure:
+                        self.kernel_unary[f'({di},{do},{dvi},{dvo})'] = PairwiseConv(di, mi, do, mo, edge_dim=edge_dim)
+
+    def __repr__(self):
+        return f'GConvSE3Partial(structure={self.f_out})'
+
+    def udf_u_mul_e(self, d_out, dv_in, dv_out):
+        """Compute the partial convolution for a single output feature type.
+
+        This function is set up as a User Defined Function in DGL.
+
+        Args:
+            d_out: output feature type
+        Returns:
+            node -> edge function handle
+        """
+        def fnc(edges):
+            # Neighbor -> center messages
+            msg = 0
+            for m_in, d_in in self.f_in.structure:
+                # if type 1 and flag set, add relative position as feature
+                if self.x_ij == 'cat' and d_in == 1:
+                    # relative positions
+                    rel = (edges.dst['x'] - edges.src['x']).view(-1, 3, 1)
+                    m_ori = m_in - 1
+                    if m_ori == 0:
+                        # no type 1 input feature, just use relative position
+                        src = rel
+                    else:
+                        # features of src node, shape [edges, m_in*(2l+1), 1]
+                        src = edges.src[f'{d_in}'].view(-1, m_ori*(2*d_in+1), 1)
+                        # add to feature vector
+                        src = torch.cat([src, rel], dim=1)
+                elif self.x_ij == 'add' and d_in == 1 and m_in > 1:
+                    src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
+                    rel = (edges.dst['x'] - edges.src['x']).view(-1, 3, 1)
+                    src[..., :3, :1] = src[..., :3, :1] + rel
+                else:
+                    src = edges.src[f'{d_in}'].view(-1, m_in*(2*d_in+1), 1)
+                edge = edges.data[f'({d_in},{d_out},{dv_in},{dv_out})']
+                msg = msg + torch.matmul(edge, src) #sum over all d_in => prob need to keep this separate, not sum up
+            msg = msg.view(msg.shape[0], -1, 2*d_out+1)
+
+            return {f'out{d_out},{dv_in},{dv_out}': msg.view(msg.shape[0], -1, 2*d_out+1)}
+        return fnc
+
+    @profile
+    def forward(self, h, G=None, r=None, basis=None, **kwargs):
+        """Forward pass of the linear layer
+
+        Args:
+            h: dict of node-features
+            G: minibatch of (homo)graphs
+            r: inter-atomic distances
+            basis: pre-computed Q * Y
+        Returns:
+            tensor with new features [B, n_points, n_features_out]
+        """
+        with G.local_scope():
+            # Add node features to local graph scope
+            for k, v in h.items():
+                G.ndata[k] = v
+
+            # Add edge features
+            if 'w' in G.edata.keys():
+                w = G.edata['w'] # shape: [#edges_in_batch, #bond_types]
+                feat = torch.cat([w, r], -1)
+            else:
+                feat = torch.cat([r, ], -1)
+            for (mi, di) in self.f_in.structure:
+                for (mo, do) in self.f_out.structure:
+                    for (mvi, dvi) in self.fv_in.structure:
+                        for (mvo, dvo) in self.fv_out.structure:
+                            etype = f'({di},{do},{dvi},{dvo})'
+                            G.edata[etype] = self.kernel_unary[etype](feat, basis)
+
+            # Perform message-passing for each output feature type
+            for dv_i in self.fv_in.degrees:
+                for dv_o in self.fv_out.degrees:
+                    for d in self.f_out.degrees:
+                        G.apply_edges(self.udf_u_mul_e(d, dv_i, dv_o))
+
+            return {f'{d},{dv_i},{dv_o}': G.edata[f'out{d},{dv_i},{dv_o}'] for d in self.f_out.degrees for dv_i in self.fv_in.degrees for dv_o in self.fv_out.degrees}
+
+##########################################
+
 class GMABSE3(nn.Module):
     """An SE(3)-equivariant multi-headed self-attention module for DGL graphs."""
     def __init__(self, f_value: Fiber, f_key: Fiber, n_heads: int):
@@ -690,7 +971,6 @@ class GMABSE3(nn.Module):
 
             # Apply attention weights
             msg = attn.unsqueeze(-1).unsqueeze(-1) * value
-
             return {'m': msg}
         return fnc
 
@@ -710,8 +990,8 @@ class GMABSE3(nn.Module):
             # Add node features to local graph scope
             ## We use the stacked tensor representation for attention
             for m, d in self.f_value.structure:
-                G.edata[f'v{d}'] = v[f'{d}'].view(-1, self.n_heads, m//self.n_heads, 2*d+1)
-            G.edata['k'] = fiber2head(k, self.n_heads, self.f_key, squeeze=True) # [edges, heads, channels](?)
+                G.edata[f'v{d}'] = v[f'{d}'].view(-1, self.n_heads, m//self.n_heads, 2*d+1) #keep vector shape for different type
+            G.edata['k'] = fiber2head(k, self.n_heads, self.f_key, squeeze=True) # [edges, heads, channels](?) #concat all types into 1 vector
             G.ndata['q'] = fiber2head(q, self.n_heads, self.f_key, squeeze=True) # [nodes, heads, channels](?)
 
             # Compute attention weights
@@ -738,6 +1018,111 @@ class GMABSE3(nn.Module):
 
             return output
 
+##########################################
+def fiber2head_qkv(F, h, structure, vin, vout, squeeze=False):
+    if squeeze:
+        fibers = [F[f'{i},{vin},{vout}'].view(*F[f'{i},{vin},{vout}'].shape[:-2], h, -1) for i in structure.degrees]
+        fibers = torch.cat(fibers, -1)
+    else:
+        fibers = [F[f'{i}'].view(*F[f'{i}'].shape[:-2], h, -1, 1) for i in structure.degrees]
+        fibers = torch.cat(fibers, -2)
+    return fibers
+
+
+class GMABSE3_qkv(nn.Module):
+    """An SE(3)-equivariant multi-headed self-attention module for DGL graphs."""
+
+    def __init__(self, f_value: Fiber, f_key: Fiber, fv_in,  n_heads: int):
+        """SE(3)-equivariant MAB (multi-headed attention block) layer.
+
+        Args:
+            f_value: Fiber() object for value-embeddings
+            f_key: Fiber() object for key-embeddings
+            n_heads: number of heads
+        """
+        super().__init__()
+        self.f_value = f_value
+        self.f_key = f_key
+        self.fv_in = fv_in
+        self.n_heads = n_heads
+        self.new_dgl = version.parse(dgl.__version__) > version.parse('0.4.4')
+
+    def __repr__(self):
+        return f'GMABSE3(n_heads={self.n_heads}, structure={self.f_value})'
+
+    def udf_u_mul_e(self, d_out):
+        """Compute the weighted sum for a single output feature type.
+
+        This function is set up as a User Defined Function in DGL.
+
+        Args:
+            d_out: output feature type
+        Returns:
+            edge -> node function handle
+        """
+
+        def fnc(edges):
+            # Neighbor -> center messages
+            msg = 0
+            for dv_in in self.fv_in.degrees:
+                attn = edges.data[f'a{dv_in},{d_out}']
+                value = edges.data[f'v{dv_in},{d_out}']
+
+            # Apply attention weights
+                msg += attn.unsqueeze(-1).unsqueeze(-1) * value
+
+            return {'m': msg}
+
+        return fnc
+
+    @profile
+    def forward(self, v, k: Dict = None, q: Dict = None, G=None, **kwargs):
+        """Forward pass of the linear layer
+
+        Args:
+            G: minibatch of (homo)graphs
+            v: dict of value edge-features
+            k: dict of key edge-features
+            q: dict of query node-features
+        Returns:
+            tensor with new features [B, n_points, n_features_out]
+        """
+        with G.local_scope():
+            # Add node features to local graph scope
+            ## We use the stacked tensor representation for attention
+            for mv_in, dv_in in self.fv_in.structure:
+                for mv_out, dv_out in self.f_value.structure:
+                    G.edata[f'v{dv_in},{dv_out}'] = v[f'{dv_in},{dv_out}'].view(-1, self.n_heads, mv_out // self.n_heads,
+                                                  2 * dv_out + 1)
+                    G.edata[f'k{dv_in},{dv_out}'] = fiber2head_qkv(k, self.n_heads, self.f_key, dv_in, dv_out,
+                                      squeeze=True)
+                    G.ndata[f'q{dv_in},{dv_out}'] = fiber2head_qkv(q, self.n_heads, self.f_key, dv_in, dv_out, squeeze=True)  # [nodes, heads, channels](?)
+
+            # Compute attention weights
+            ## Inner product between (key) neighborhood and (query) center
+
+                    G.apply_edges(fn.e_dot_v(f'k{dv_in},{dv_out}', f'q{dv_in},{dv_out}', f'e{dv_in},{dv_out}'))
+
+            ## Apply softmax
+                    e = G.edata.pop(f'e{dv_in},{dv_out}')
+                    if self.new_dgl:
+                        # in dgl 5.3, e has an extra dimension compared to dgl 4.3
+                        # the following, we get rid of this be reshaping
+                        n_edges = G.edata[f'k{dv_in},{dv_out}'].shape[0]
+                        e = e.view([n_edges, self.n_heads])
+                    e = e / np.sqrt(self.f_key.n_features)
+                    G.edata[f'a{dv_in},{dv_out}'] = edge_softmax(G, e)
+
+            # Perform attention-weighted message-passing
+            for d in self.f_value.degrees:
+                G.update_all(self.udf_u_mul_e(d), fn.sum('m', f'out{d}'))
+
+            output = {}
+            for m, d in self.f_value.structure:
+                output[f'{d}'] = G.ndata[f'out{d}'].view(-1, m, 2 * d + 1)
+
+            return output
+##########################################
 
 class GSE3Res(nn.Module):
     """Graph attention block with SE(3)-equivariance and skip connection"""
@@ -761,17 +1146,22 @@ class GSE3Res(nn.Module):
         f_mid_in = {d: m for d, m in f_mid_out.items() if d in self.f_in.degrees}
         self.f_mid_in = Fiber(dictionary=f_mid_in)
 
+
         self.edge_dim = edge_dim
 
         self.GMAB = nn.ModuleDict()
 
         # Projections
-        self.GMAB['v'] = GConvSE3Partial(f_in, self.f_mid_out, edge_dim=edge_dim, x_ij=x_ij)
-        self.GMAB['k'] = GConvSE3Partial(f_in, self.f_mid_in, edge_dim=edge_dim, x_ij=x_ij)
-        self.GMAB['q'] = G1x1SE3(f_in, self.f_mid_in)
+        # self.GMAB['v'] = GConvSE3Partial(f_in, self.f_mid_out, edge_dim=edge_dim, x_ij=x_ij)
+        self.GMAB['v'] = GConvSE3Partial_value(f_in, self.f_mid_out, edge_dim=edge_dim, x_ij=x_ij)
+        # self.GMAB['k'] = GConvSE3Partial(f_in, self.f_mid_in, edge_dim=edge_dim, x_ij=x_ij)
+        self.GMAB['k'] = GConvSE3Partial_key(f_in, self.f_mid_in, f_in, self.f_mid_out, edge_dim=edge_dim, x_ij=x_ij)
+        # self.GMAB['q'] = G1x1SE3(f_in, self.f_mid_in)
+        self.GMAB['q'] = G1x1SE3_q(f_in, self.f_mid_in, f_in, self.f_mid_out)
 
         # Attention
-        self.GMAB['attn'] = GMABSE3(self.f_mid_out, self.f_mid_in, n_heads=n_heads)
+        # self.GMAB['attn'] = GMABSE3(self.f_mid_out, self.f_mid_in, n_heads=n_heads)
+        self.GMAB['attn'] = GMABSE3_qkv(self.f_mid_out, self.f_mid_in, f_in, n_heads=n_heads)
 
         # Skip connections
         if self.skip == 'cat':

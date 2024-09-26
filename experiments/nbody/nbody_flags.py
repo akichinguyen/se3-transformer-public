@@ -38,7 +38,7 @@ def get_flags():
     # An argument to specify which dataset type to use (for now)
     parser.add_argument('--ri_data_type', type=str, default="charged",
                         choices=['charged', 'charged_infer', 'springs',
-                                 'springs_infer'])
+                                 'springs_infer', 'dipole'])
     # location of data for relational inference
     parser.add_argument('--ri_data', type=str, default='data_generation')
     parser.add_argument('--data_str', type=str, default='my_datasetfile')

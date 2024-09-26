@@ -1,8 +1,12 @@
+import sys
+import os
+
+# sys.path.insert(0, '/home/oleksandr/Documents/original_se3-transformer-public-master')
+sys.path.insert(0, os.path.abspath('../..'))
+print(sys.path)
 from utils.utils_profiling import *  # load before other local modules
 
 import argparse
-import os
-import sys
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -29,12 +33,14 @@ def to_np(x):
     return x.cpu().detach().numpy()
 
 
-def get_acc(pred, x_T, v_T, y=None, verbose=True):
+def get_acc(pred, x_T, v_T, ornt_T, ang_v_T, y=None, verbose=True):
 
     acc_dict = {}
     pred = to_np(pred)
     x_T = to_np(x_T)
     v_T = to_np(v_T)
+    ornt_T = to_np(ornt_T)
+    ang_v_T = to_np(ang_v_T)
     assert len(pred) == len(x_T)
 
     if verbose:
@@ -48,6 +54,12 @@ def get_acc(pred, x_T, v_T, y=None, verbose=True):
     _sq = (pred[:, 1, :] - v_T) ** 2
     acc_dict['vel_mse'] = np.mean(_sq)
 
+    _sq = (pred[:, 2, :] - ornt_T) ** 2
+    acc_dict['ornt_mse'] = np.mean(_sq)
+
+    _sq = (pred[:, 3, :] - ang_v_T) ** 2
+    acc_dict['ang_v_mse'] = np.mean(_sq)
+
     return acc_dict
 
 
@@ -57,16 +69,24 @@ def train_epoch(epoch, model, loss_fnc, dataloader, optimizer, schedul, FLAGS):
 
     num_iters = len(dataloader)
     wandb.log({"lr": optimizer.param_groups[0]['lr']}, commit=False)
-    for i, (g, y1, y2) in enumerate(dataloader):
+    for i, (g, y1, y2, y3, y4) in enumerate(dataloader):
+
         g = g.to(FLAGS.device)
         x_T = y1.to(FLAGS.device).view(-1, 3)
         v_T = y2.to(FLAGS.device).view(-1, 3)
-        y = torch.stack([x_T, v_T], dim=1)
+        ornt_T = y3.to(FLAGS.device).view(-1, 3)
+        ang_v_T = y4.to(FLAGS.device).view(-1, 3)
+        y = torch.stack([x_T, v_T, ornt_T, ang_v_T], dim=1)
 
         optimizer.zero_grad()
 
         # run model forward and compute loss
         pred = model(g)
+        # print("------------")
+        # print(pred.shape)
+        # print(y.shape)
+        # print(FLAGS)
+        # print("------------")
         loss = loss_fnc(pred, y)
         loss_epoch += to_np(loss)
 
@@ -103,34 +123,36 @@ def train_epoch(epoch, model, loss_fnc, dataloader, optimizer, schedul, FLAGS):
 def test_epoch(epoch, model, loss_fnc, dataloader, FLAGS, dT):
     model.eval()
 
-    keys = ['pos_mse', 'vel_mse']
+    keys = ['pos_mse', 'vel_mse', 'ornt_mse', 'ang_v_mse']
     acc_epoch = {k: 0.0 for k in keys}
     acc_epoch_blc = {k: 0.0 for k in keys}  # for constant baseline
     acc_epoch_bll = {k: 0.0 for k in keys}  # for linear baseline
     loss_epoch = 0.0
-    for i, (g, y1, y2) in enumerate(dataloader):
+    for i, (g, y1, y2, y3, y4) in enumerate(dataloader):
         g = g.to(FLAGS.device)
         x_T = y1.view(-1, 3)
         v_T = y2.view(-1, 3)
-        y = torch.stack([x_T, v_T], dim=1).to(FLAGS.device)
+        ornt_T = y3.view(-1, 3)
+        ang_v_T = y4.view(-1, 3)
+        y = torch.stack([x_T, v_T, ornt_T, ang_v_T], dim=1).to(FLAGS.device)
 
         # run model forward and compute loss
         pred = model(g).detach()
         loss_epoch += to_np(loss_fnc(pred, y)/len(dataloader))
-        acc = get_acc(pred, x_T, v_T, y=y)
+        acc = get_acc(pred, x_T, v_T, ornt_T, ang_v_T, y=y)
         for k in keys:
             acc_epoch[k] += acc[k]/len(dataloader)
 
         # eval constant baseline
         bl_pred = torch.zeros_like(pred)
-        acc = get_acc(bl_pred, x_T, v_T, verbose=False)
+        acc = get_acc(bl_pred, x_T, v_T, ornt_T, ang_v_T, verbose=False)
         for k in keys:
             acc_epoch_blc[k] += acc[k]/len(dataloader)
 
         # eval linear baseline
         # Apply linear update to locations.
-        bl_pred[:, 0, :] = dT * g.ndata['v'][:, 0, :]
-        acc = get_acc(bl_pred, x_T, v_T, verbose=False)
+        bl_pred[:, 0, :] = dT * g.ndata['f'][:, 0, :]
+        acc = get_acc(bl_pred, x_T, v_T, ornt_T, ang_v_T, verbose=False)
         for k in keys:
             acc_epoch_bll[k] += acc[k] / len(dataloader)
 
@@ -140,7 +162,11 @@ def test_epoch(epoch, model, loss_fnc, dataloader, FLAGS, dT):
         wandb.log({"Test " + k: acc_epoch[k]}, commit=False)
     wandb.log({'Const. BL pos_mse': acc_epoch_blc['pos_mse']}, commit=False)
     wandb.log({'Linear BL pos_mse': acc_epoch_bll['pos_mse']}, commit=False)
+    wandb.log({'Const. BL ornt_mse': acc_epoch_blc['ornt_mse']}, commit=False)
+    wandb.log({'Linear BL ornt_mse': acc_epoch_bll['ornt_mse']}, commit=False)
     wandb.log({'Linear BL vel_mse': acc_epoch_bll['vel_mse']}, commit=False)
+    wandb.log({'Linear BL ang_v_mse': acc_epoch_bll['ang_v_mse']}, commit=False)
+
 
 
 class RandomRotation(object):
@@ -154,9 +180,9 @@ class RandomRotation(object):
 
 
 def collate(samples):
-    graphs, y1, y2 = map(list, zip(*samples))
+    graphs, y1, y2, y3, y4 = map(list, zip(*samples))
     batched_graph = dgl.batch(graphs)
-    return batched_graph, torch.stack(y1), torch.stack(y2)
+    return batched_graph, torch.stack(y1), torch.stack(y2), torch.stack(y3), torch.stack(y4)
 
 
 def main(FLAGS, UNPARSED_ARGV):
@@ -197,24 +223,41 @@ def main(FLAGS, UNPARSED_ARGV):
 
     utils_logging.write_info_file(model, FLAGS=FLAGS, UNPARSED_ARGV=UNPARSED_ARGV, wandb_log_dir=wandb.run.dir)
 
-    if FLAGS.restore is not None:
-        model.load_state_dict(torch.load(FLAGS.restore))
     model.to(FLAGS.device)
-
-    # Optimizer settings
     optimizer = optim.Adam(model.parameters(), lr=FLAGS.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, FLAGS.num_epochs, eta_min=1e-4)
     criterion = nn.MSELoss()
     criterion = criterion.to(FLAGS.device)
     task_loss = criterion
+    ep_start = 0
+    if FLAGS.restore is not None:
+        checkpoint = torch.load(FLAGS.restore)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        ep_start = checkpoint['epoch']
+    #model.to(FLAGS.device)
+
+    # Optimizer settings
+    #optimizer = optim.Adam(model.parameters(), lr=FLAGS.lr)
+    #scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, FLAGS.num_epochs, eta_min=1e-4)
+    #criterion = nn.MSELoss()
+    #criterion = criterion.to(FLAGS.device)
+    #task_loss = criterion
 
     # Save path
     save_path = os.path.join(FLAGS.save_dir, FLAGS.name + '.pt')
 
     # Run training
     print('Begin training')
-    for epoch in range(FLAGS.num_epochs):
-        torch.save(model.state_dict(), save_path)
+    for epoch in range(ep_start, FLAGS.num_epochs):
+        torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict()
+                }, save_path)
+        #torch.save(model.state_dict(), save_path)
         print(f"Saved: {save_path}")
 
         train_epoch(epoch, model, task_loss, train_loader, optimizer, scheduler, FLAGS)
@@ -227,7 +270,7 @@ if __name__ == '__main__':
     os.makedirs(FLAGS.save_dir, exist_ok=True)
 
     # Log all args to wandb
-    wandb.init(project='equivariant-attention', name=FLAGS.name, config=FLAGS)
+    wandb.init(project='equivariant-attention', resume=True, name=FLAGS.name, config=FLAGS)
     wandb.save('*.txt')
 
     # Where the magic is
